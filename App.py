@@ -1,5 +1,6 @@
 import datetime
 import numpy as np
+import pandas as pd
 import streamlit as st
 
 # --- CONFIGURAZIONE PAGINA ---
@@ -8,7 +9,7 @@ st.set_page_config(
 )
 
 st.title("🌊 Monitoraggio Bilancio Idrico — Diga Grotta Campanaro")
-st.caption("Sistema integrato di calcolo invaso e scarichi da tabelle ufficiali")
+st.caption("Sistema integrato di calcolo invaso, scarichi e bilancio idrico")
 
 # ==============================================================================
 # 1. TABELLA SCALA D'INVASO (GROTTA CAMPANARO)
@@ -607,7 +608,7 @@ PORTATE_M3S = np.array([
 
 
 def get_qout_ls(quota_mslm, apertura_cm):
-  """Interpolazione bilineare con NumPy per calcolare la portata scaricata in l/s."""
+  """Calcola la portata scaricata (l/s) in base a quota e apertura."""
   apertura_m = apertura_cm / 100.0
   apertura_m = np.clip(apertura_m, APERTURE_M[0], APERTURE_M[-1])
   quota_mslm = np.clip(quota_mslm, QUOTE_PARATOIA[0], QUOTE_PARATOIA[-1])
@@ -627,8 +628,37 @@ def get_qout_ls(quota_mslm, apertura_cm):
   return float(q_m3s * 1000.0)
 
 
+def get_apertura_consigliata_cm(quota_mslm, q_target_ls):
+  """Calcola i centimetri di apertura necessari per scaricare esattamente la Qin."""
+  q_target_m3s = q_target_ls / 1000.0
+  quota_mslm = np.clip(quota_mslm, QUOTE_PARATOIA[0], QUOTE_PARATOIA[-1])
+
+  idx = np.searchsorted(QUOTE_PARATOIA, quota_mslm)
+  if idx == 0:
+    q_array = PORTATE_M3S[0]
+  elif idx == len(QUOTE_PARATOIA):
+    q_array = PORTATE_M3S[-1]
+  else:
+    q0, q1 = QUOTE_PARATOIA[idx - 1], QUOTE_PARATOIA[idx]
+    t = (quota_mslm - q0) / (q1 - q0) if q1 != q0 else 0
+    q_array = PORTATE_M3S[idx - 1] + t * (PORTATE_M3S[idx] - PORTATE_M3S[idx - 1])
+
+  apertura_m = np.interp(q_target_m3s, q_array, APERTURE_M)
+  return (
+      float(apertura_m * 100.0),
+      float(q_array[0] * 1000.0),
+      float(q_array[-1] * 1000.0),
+  )
+
+
 # ==============================================================================
-# 3. INTERFACCIA UTENTE STREAMLIT
+# 3. STATO SESSIONE (STORICO)
+# ==============================================================================
+if "storico" not in st.session_state:
+  st.session_state.storico = []
+
+# ==============================================================================
+# 4. INTERFACCIA UTENTE
 # ==============================================================================
 st.subheader("📝 Nuova Rilevazione")
 
@@ -648,96 +678,228 @@ with col1:
       format="%.2f",
   )
 
-  # NUOVO CAMPO: Portata Entrante Qin
-  q_in_ls = st.number_input(
-      "Portata in Entrata Qin (l/s)",
-      value=545.0,
-      min_value=0.0,
-      max_value=50000.0,
-      step=5.0,
-      format="%.1f",
+  # MODIFICA 2: Quota Target impostabile liberamente dall'utente
+  quota_target = st.number_input(
+      "Quota Target (mslm)",
+      value=765.00,
+      min_value=764.00,
+      max_value=785.00,
+      step=0.01,
+      format="%.2f",
   )
 
 with col2:
   apertura = st.number_input(
-      "Apertura Paratoia (cm)",
+      "Apertura Paratoia Impostata (cm)",
       value=4.0,
       min_value=1.0,
       max_value=90.0,
       step=0.1,
       format="%.1f",
   )
-
   modalita = st.radio(
       "Modalità Operativa",
       ["Mantenimento Quota Costante", "Raggiungi Quota Target"],
   )
 
-# --- CALCOLI IN TEMPO REALE ---
+# ==============================================================================
+# 5. MODIFICA 1: CALCOLO AUTOMATICO PORTATA IN ENTRATA (Qin)
+# ==============================================================================
+st.markdown("---")
+st.subheader("💧 Calcolo Automatico Portata in Entrata ($Q_{in}$)")
+
 q_out_ls = get_qout_ls(quota_attuale, apertura)
 vol_attuale = get_volume_da_quota(quota_attuale)
-quota_target = 765.00
+
+use_manual_prev = st.checkbox(
+    "Inserisci manualmente i dati della lettura precedente per calcolare Qin",
+    value=not bool(st.session_state.storico),
+)
+
+if use_manual_prev or not st.session_state.storico:
+  col_p1, col_p2 = st.columns(2)
+  with col_p1:
+    quota_prev = st.number_input(
+        "Quota Precedente (mslm)",
+        value=quota_attuale,
+        min_value=764.00,
+        max_value=785.00,
+        step=0.01,
+        format="%.2f",
+    )
+  with col_p2:
+    ore_trascorse = st.number_input(
+        "Ore trascorse dalla rilevazione precedente",
+        value=1.0,
+        min_value=0.01,
+        max_value=168.0,
+        step=0.5,
+        format="%.2f",
+    )
+
+  vol_prev = get_volume_da_quota(quota_prev)
+  delta_vol = vol_attuale - vol_prev  # in m³
+  delta_t_sec = ore_trascorse * 3600.0
+  # Qin = (dV / dt in m³/s * 1000) + Qout
+  q_in_ls = max(0.0, (delta_vol / delta_t_sec) * 1000.0 + q_out_ls)
+
+else:
+  ultima_lettura = st.session_state.storico[-1]
+  str_dt_prev = f"{ultima_lettura['Data']} {ultima_lettura['Ora']}"
+  try:
+    dt_prev = datetime.datetime.strptime(str_dt_prev, "%Y-%m-%d %H:%M:%S")
+  except ValueError:
+    dt_prev = datetime.datetime.combine(data_rilevazione, ora_rilevazione)
+
+  dt_curr = datetime.datetime.combine(data_rilevazione, ora_rilevazione)
+  delta_t_sec = (dt_curr - dt_prev).total_seconds()
+
+  if delta_t_sec > 0:
+    vol_prev = ultima_lettura["Volume (m³)"]
+    q_out_prev = ultima_lettura["Qout (l/s)"]
+    q_out_medio = (q_out_ls + q_out_prev) / 2.0
+    delta_vol = vol_attuale - vol_prev
+    q_in_ls = max(0.0, (delta_vol / delta_t_sec) * 1000.0 + q_out_medio)
+  else:
+    q_in_ls = q_out_ls
+
+st.info(
+    f"🌊 **Portata in Entrata Calcolata ($Q_{{in}}$): {q_in_ls:.1f} l/s** "
+    f"(stimata in base alla variazione del volume e lo scarico nel tempo)."
+)
+
+# ==============================================================================
+# 6. BILANCIO IDRICO E SUGGERIMENTI OPERATIVI
+# ==============================================================================
 vol_target = get_volume_da_quota(quota_target)
 bilancio_delta_q = q_in_ls - q_out_ls
 
 st.markdown("---")
-st.subheader("📊 Calcoli e Bilancio Idrico")
+st.subheader("📊 Bilancio e Suggerimenti Operativi")
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric(
-    label="Portata Entrante (Qin)",
-    value=f"{q_in_ls:.1f} l/s",
-    delta=f"{q_in_ls/1000:.3f} m³/s",
-)
-c2.metric(
-    label="Portata Scaricata (Qout)",
-    value=f"{q_out_ls:.1f} l/s",
-    delta=f"{q_out_ls/1000:.3f} m³/s",
-)
-c3.metric(
-    label="Bilancio Netto (ΔQ)",
-    value=f"{bilancio_delta_q:+.1f} l/s",
-    delta_color="normal",
-)
-c4.metric(label="Volume Attuale Stimato", value=f"{vol_attuale:,.0f} m³")
+c1.metric(label="Portata Entrante (Qin Calcolata)", value=f"{q_in_ls:.1f} l/s")
+c2.metric(label="Portata Scaricata (Qout)", value=f"{q_out_ls:.1f} l/s")
+c3.metric(label="Bilancio Netto (ΔQ)", value=f"{bilancio_delta_q:+.1f} l/s")
+c4.metric(label="Volume Attuale", value=f"{vol_attuale:,.0f} m³")
 
-# --- INDICAZIONI OPERATIVE IN BASE ALLA MODALITÀ ---
 if modalita == "Mantenimento Quota Costante":
-  st.markdown("#### 🎯 Analisi Mantenimento Quota")
-  if abs(bilancio_delta_q) < 1.0:
-    st.success(
-        "**Invaso in perfetto equilibrio.** La portata scaricata eguaglia la"
-        " portata in entrata. La quota rimarrà costante."
+  apertura_rec_cm, min_q, max_q = get_apertura_consigliata_cm(
+      quota_attuale, q_in_ls
+  )
+
+  st.markdown("#### 🎯 Suggerimento Paratoia per Mantenimento Quota")
+  if q_in_ls < min_q:
+    st.error(
+        f"La portata in entrata ({q_in_ls:.1f} l/s) è inferiore alla portata"
+        f" minima di scarico ({min_q:.1f} l/s) alla quota attuale."
     )
-  elif bilancio_delta_q > 0:
-    st.warning(
-        f"**Invaso in riempimento (+{bilancio_delta_q:.1f} l/s).** Per"
-        f" mantenere la quota attuale ({quota_attuale:.2f} mslm), la"
-        " paratoia dovrebbe scaricare **"
-        f"{q_in_ls:.1f} l/s**."
+  elif q_in_ls > max_q:
+    st.error(
+        f"La portata in entrata ({q_in_ls:.1f} l/s) supera la capacità massima"
+        f" della paratoia ({max_q:.1f} l/s) alla quota attuale."
     )
   else:
+    st.success(
+        f"👉 Per mantenere la quota costante a **{quota_attuale:.2f} mslm** con"
+        f" un'affluenza calcolata di **{q_in_ls:.1f} l/s**, imposta la paratoia"
+        f" a **{apertura_rec_cm:.1f} cm**."
+    )
+
+  if abs(apertura - apertura_rec_cm) > 0.1:
+    delta_cm = apertura_rec_cm - apertura
+    azione = "aumentare" if delta_cm > 0 else "ridurre"
     st.info(
-        f"**Invaso in svaso ({bilancio_delta_q:.1f} l/s).** La paratoia sta"
-        " scaricando più di quanto entra. Per mantenere la quota attuale,"
-        f" ridurre lo scarico a **{q_in_ls:.1f} l/s**."
+        f"Differenza rispetto all'impostazione attuale ({apertura:.1f} cm):"
+        f" {azione} di **{abs(delta_cm):.1f} cm**."
     )
 
 elif modalita == "Raggiungi Quota Target":
-  st.markdown("#### 🎯 Analisi Raggiungimento Target")
+  st.markdown("#### ⏱️ Stima Tempi di Raggiungimento Target")
   delta_vol = vol_attuale - vol_target
-  if delta_vol > 0:
-    st.info(
-        f"Volume rimanente da scaricare per la quota target ({quota_target:.2f}"
+  net_flow_m3s = (q_out_ls - q_in_ls) / 1000.0
+
+  if delta_vol > 0:  # Svaso
+    st.write(
+        f"Volume da svasare per raggiungere la quota target ({quota_target:.2f}"
         f" mslm): **{delta_vol:,.0f} m³**"
     )
-  elif delta_vol == 0:
-    st.success("Quota target raggiunta!")
-  else:
-    st.warning("La quota attuale è inferiore alla quota target.")
+    if net_flow_m3s <= 0:
+      st.error(
+          "⚠️ Qout è inferiore o uguale a Qin. L'invaso non si sta svasando:"
+          " aumenta l'apertura della paratoia."
+      )
+    else:
+      time_sec = delta_vol / net_flow_m3s
+      hours = int(time_sec // 3600)
+      minutes = int((time_sec % 3600) // 60)
+      st.success(
+          f"⏱️ Tempo stimato di svaso: **{hours} ore e {minutes} minuti** (a"
+          " portata e afflusso costanti)."
+      )
 
-if st.button("➕ Registra Lettura", use_container_width=True):
-  st.success(
-      f"Registrato: Quota {quota_attuale:.2f} mslm | Qin: {q_in_ls:.1f} l/s |"
-      f" Paratoia {apertura:.1f} cm (Qout: {q_out_ls:.1f} l/s)"
+  elif delta_vol < 0:  # Riempimento
+    st.write(
+        f"Volume da accumulare per raggiungere la quota target"
+        f" ({quota_target:.2f} mslm): **{abs(delta_vol):,.0f} m³**"
+    )
+    if net_flow_m3s >= 0:
+      st.error(
+          "⚠️ Qout è superiore o uguale a Qin. L'invaso non si sta riempendo:"
+          " riduci l'apertura della paratoia."
+      )
+    else:
+      time_sec = abs(delta_vol) / abs(net_flow_m3s)
+      hours = int(time_sec // 3600)
+      minutes = int((time_sec % 3600) // 60)
+      st.success(
+          f"⏱️ Tempo stimato di riempimento: **{hours} ore e {minutes} minuti**"
+          " (a portata e afflusso costanti)."
+      )
+  else:
+    st.success("La quota attuale coincide già con la quota target.")
+
+# --- REGISTRAZIONE LETTURA ---
+if st.button("➕ Registra Lettura nello Storico", use_container_width=True):
+  ora_formatted = ora_rilevazione.strftime("%H:%M:%S")
+  nuova_lettura = {
+      "Data": str(data_rilevazione),
+      "Ora": ora_formatted,
+      "Quota (mslm)": quota_attuale,
+      "Qin (l/s)": round(q_in_ls, 1),
+      "Apertura (cm)": apertura,
+      "Qout (l/s)": round(q_out_ls, 1),
+      "ΔQ (l/s)": round(bilancio_delta_q, 1),
+      "Volume (m³)": vol_attuale,
+      "Modalità": modalita,
+  }
+  st.session_state.storico.append(nuova_lettura)
+  st.success("Lettura registrata con successo!")
+
+# --- SEZIONE GRAFICO E STORICO ---
+st.markdown("---")
+col_g1, col_g2 = st.columns([1, 1])
+
+with col_g1:
+  st.subheader("📈 Curva di Invaso (Grotta Campanaro)")
+  df_curve = pd.DataFrame(
+      {"Quota (mslm)": QUOTE_INVASO, "Volume (m³)": VOLUMI_INVASO}
   )
+  st.line_chart(df_curve, x="Quota (mslm)", y="Volume (m³)", color="#0083B0")
+
+with col_g2:
+  st.subheader("📋 Storico Rilevazioni")
+  if st.session_state.storico:
+    df_hist = pd.DataFrame(st.session_state.storico)
+    st.dataframe(df_hist, use_container_width=True)
+
+    csv_data = df_hist.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="📥 Scarica Report CSV",
+        data=csv_data,
+        file_name=f"report_diga_{datetime.date.today()}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+  else:
+    st.info("Nessuna rilevazione salvata nella sessione corrente.")
