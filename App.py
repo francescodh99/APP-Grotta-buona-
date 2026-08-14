@@ -13,9 +13,14 @@ if "storico" not in st.session_state:
     st.session_state.storico = []
 
 # Mappatura apertura paratoia (cm) -> scarico Q_out (l/s)
-def get_qout(cm):
-    tabella_qout = {0: 0, 1: 150, 2: 300, 3: 450, 4: 600, 5: 750, 6: 900}
-    return tabella_qout.get(cm, cm * 150)
+apertura = st.number_input(
+    "Apertura Paratoia (cm)",
+    value=4.0,
+    min_value=0.0,
+    max_value=50.0,
+    step=0.1,
+    format="%.1f"
+)
 
 # Stima dell'apertura consigliata in cm per bilanciare Q_in
 def get_cm_consigliati(q_in):
