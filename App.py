@@ -1,6 +1,5 @@
 import datetime
 import numpy as np
-from scipy.interpolate import RegularGridInterpolator
 import streamlit as st
 
 # --- CONFIGURAZIONE PAGINA ---
@@ -9,9 +8,10 @@ st.set_page_config(
 )
 
 st.title("🌊 Monitoraggio Bilancio Idrico — Diga Grotta Campanaro")
+st.caption("Sistema integrato di calcolo invaso e scarichi da tabelle ufficiali")
 
 # ==============================================================================
-# 1. TABELLE E FUNZIONI DI INTERPOLAZIONE
+# 1. TABELLA SCALA D'INVASO (GROTTA CAMPANARO)
 # ==============================================================================
 QUOTE_INVASO = np.array([
     764.00,
@@ -65,6 +65,15 @@ VOLUMI_INVASO = np.array([
     1130000,
 ])
 
+
+def get_volume_da_quota(quota_mslm):
+  """Interpolazione della scala d'invaso per ottenere il volume in m³."""
+  return float(np.interp(quota_mslm, QUOTE_INVASO, VOLUMI_INVASO))
+
+
+# ==============================================================================
+# 2. TABELLA SCARICO PARATOIA DI FONDO
+# ==============================================================================
 APERTURE_M = np.array([
     0.01,
     0.02,
@@ -459,20 +468,20 @@ PORTATE_M3S = np.array([
         0.4,
         0.6,
         0.8,
-        1.1,
-        1.3,
-        1.5,
-        1.7,
-        1.9,
+        1.0,
+        1.2,
+        1.4,
+        1.6,
+        1.8,
         2.1,
-        4.2,
-        6.3,
-        8.4,
-        10.5,
-        12.6,
-        14.7,
-        16.8,
-        18.9,
+        4.1,
+        6.1,
+        8.1,
+        10.2,
+        12.2,
+        14.3,
+        16.3,
+        18.4,
     ],
     [
         0.2,
@@ -537,7 +546,7 @@ PORTATE_M3S = np.array([
     [
         0.2,
         0.4,
-        0.7,
+        0.4,
         0.9,
         1.1,
         1.3,
@@ -557,7 +566,7 @@ PORTATE_M3S = np.array([
     [
         0.2,
         0.4,
-        0.7,
+        0.4,
         0.9,
         1.1,
         1.3,
@@ -577,7 +586,7 @@ PORTATE_M3S = np.array([
     [
         0.2,
         0.4,
-        0.7,
+        0.4,
         0.9,
         1.1,
         1.3,
@@ -596,53 +605,51 @@ PORTATE_M3S = np.array([
     ],
 ])
 
-interpolatore_paratoia = RegularGridInterpolator(
-    (QUOTE_PARATOIA, APERTURE_M), PORTATE_M3S, method="linear"
-)
-
-
-def get_volume_da_quota(quota_mslm):
-  return float(np.interp(quota_mslm, QUOTE_INVASO, VOLUMI_INVASO))
-
-
-def get_quota_da_volume(vol_m3):
-  vol_m3 = np.clip(vol_m3, VOLUMI_INVASO[0], VOLUMI_INVASO[-1])
-  return float(np.interp(vol_m3, VOLUMI_INVASO, QUOTE_INVASO))
-
 
 def get_qout_ls(quota_mslm, apertura_cm):
-  apertura_m = np.clip(apertura_cm / 100.0, APERTURE_M[0], APERTURE_M[-1])
+  """Interpolazione bilineare con puro NumPy per calcolare la portata in l/s."""
+  apertura_m = apertura_cm / 100.0
+  apertura_m = np.clip(apertura_m, APERTURE_M[0], APERTURE_M[-1])
   quota_mslm = np.clip(quota_mslm, QUOTE_PARATOIA[0], QUOTE_PARATOIA[-1])
-  return float(interpolatore_paratoia((quota_mslm, apertura_m))) * 1000.0
 
+  # Trova l'intervallo di quota
+  idx = np.searchsorted(QUOTE_PARATOIA, quota_mslm)
+  if idx == 0:
+    q_m3s = np.interp(apertura_m, APERTURE_M, PORTATE_M3S[0])
+  elif idx == len(QUOTE_PARATOIA):
+    q_m3s = np.interp(apertura_m, APERTURE_M, PORTATE_M3S[-1])
+  else:
+    q0, q1 = QUOTE_PARATOIA[idx - 1], QUOTE_PARATOIA[idx]
+    v0 = np.interp(apertura_m, APERTURE_M, PORTATE_M3S[idx - 1])
+    v1 = np.interp(apertura_m, APERTURE_M, PORTATE_M3S[idx])
+    t = (quota_mslm - q0) / (q1 - q0) if q1 != q0 else 0
+    q_m3s = v0 + t * (v1 - v0)
 
-def get_apertura_suggerita(quota_mslm, q_out_desiderata_ls):
-  """Trova l'apertura in cm che genera la portata Qout richiesta alla quota data."""
-  grid_cm = np.linspace(1.0, 90.0, 891)
-  portate_grid = [get_qout_ls(quota_mslm, a) for a in grid_cm]
-  return float(np.interp(q_out_desiderata_ls, portate_grid, grid_cm))
+  return float(q_m3s * 1000.0)
 
 
 # ==============================================================================
-# 2. INSERIMENTO DATI RILEVAZIONE
+# 3. INTERFACCIA UTENTE STREAMLIT
 # ==============================================================================
-st.subheader("📝 Dati della Rilevazione")
+st.subheader("📝 Nuova Rilevazione")
 
-col_a, col_b, col_c = st.columns(3)
+col1, col2 = st.columns(2)
 
-with col_a:
+with col1:
   data_rilevazione = st.date_input("Data", value=datetime.date.today())
-  ora_rilevazione = st.time_input("Ora Rilevazione", value=datetime.time(10, 44))
-
-with col_b:
+  ora_rilevazione = st.time_input(
+      "Orario rilevazione", value=datetime.datetime.now().time()
+  )
   quota_attuale = st.number_input(
       "Quota Attuale (mslm)",
       value=766.08,
       min_value=764.00,
-      max_value=783.00,
+      max_value=785.00,
       step=0.01,
       format="%.2f",
   )
+
+with col2:
   apertura = st.number_input(
       "Apertura Paratoia (cm)",
       value=4.0,
@@ -652,148 +659,44 @@ with col_b:
       format="%.1f",
   )
 
-with col_c:
   modalita = st.radio(
       "Modalità Operativa",
       ["Mantenimento Quota Costante", "Raggiungi Quota Target"],
   )
-  qin_stimata = st.number_input(
-      "Portata in Entrata Qin (l/s)",
-      value=545.0,
-      min_value=0.0,
-      step=5.0,
-      format="%.1f",
-  )
 
-# --- CALCOLI BASE ---
-q_out_attuale = get_qout_ls(quota_attuale, apertura)
+# --- CALCOLI IN TEMPO REALE ---
+q_out_ls = get_qout_ls(quota_attuale, apertura)
 vol_attuale = get_volume_da_quota(quota_attuale)
-delta_q_ls = qin_stimata - q_out_attuale  # l/s netti
-delta_vol_ora_m3 = (delta_q_ls / 1000.0) * 3600.0  # m³/ora
-
-# Calcolo Delta Quota orario
-vol_ora_successiva = vol_attuale + delta_vol_ora_m3
-quota_ora_successiva = get_quota_da_volume(vol_ora_successiva)
-delta_quota_ora_cm = (quota_ora_successiva - quota_attuale) * 100.0
-
-# Definizione Trend
-if delta_q_ls > 5.0:
-  trend_testo = f"⬆️ In Salita (+{abs(delta_quota_ora_cm):.1f} cm/h)"
-  trend_color = "inverse"
-elif delta_q_ls < -5.0:
-  trend_testo = f"⬇️ In Discesa (-{abs(delta_quota_ora_cm):.1f} cm/h)"
-  trend_color = "normal"
-else:
-  trend_testo = "➡️ Stabile (0.0 cm/h)"
-  trend_color = "off"
+quota_target = 765.00
+vol_target = get_volume_da_quota(quota_target)
 
 st.markdown("---")
+st.subheader("📊 Calcoli e Stato Invaso")
 
-# ==============================================================================
-# 3. MODALITÀ MANTENIMENTO QUOTA COSTANTE
-# ==============================================================================
-if modalita == "Mantenimento Quota Costante":
-  st.subheader("🎯 Modalità: Mantenimento Quota Costante")
+c1, c2, c3 = st.columns(3)
+c1.metric(
+    label="Portata Scaricata (Qout)",
+    value=f"{q_out_ls:.1f} l/s",
+    delta=f"{q_out_ls/1000:.3f} m³/s",
+)
+c2.metric(label="Volume Attuale Stimato", value=f"{vol_attuale:,.0f} m³")
+c3.metric(label="Quota Target", value=f"{quota_target:.2f} mslm")
 
-  apertura_suggerita = get_apertura_suggerita(quota_attuale, qin_stimata)
+delta_vol = vol_attuale - vol_target
 
-  m1, m2, m3 = st.columns(3)
-  m1.metric("Portata Scaricata (Qout)", f"{q_out_attuale:.1f} l/s")
-  m2.metric("Portata in Entrata (Qin)", f"{qin_stimata:.1f} l/s")
-  m3.metric("Trend Quota", trend_testo)
-
-  c1, c2 = st.columns(2)
-  with c1:
+if modalita == "Raggiungi Quota Target":
+  if delta_vol > 0:
     st.info(
-        f"⚙️ **Apertura Suggerita per Quota Stabile:** **{apertura_suggerita:.1f} cm**\n\n"
-        f"Regolando la paratoia a **{apertura_suggerita:.1f} cm**, la portata scaricata ($Q_{{out}}$) "
-        f"uguaglierà la portata in entrata ($Q_{{in}} = {qin_stimata:.1f}$ l/s)."
+        f"Volume rimanente da scaricare per la quota target ({quota_target:.2f}"
+        f" mslm): **{delta_vol:,.0f} m³**"
     )
-  with c2:
-    st.metric(
-        "Delta Quota Previsto ogni Ora",
-        f"{delta_quota_ora_cm:+.1f} cm/ora",
-        help="Variazione di quota calcolata con l'apertura paratoia attuale",
-    )
+  elif delta_vol == 0:
+    st.success("Quota target raggiunta!")
+  else:
+    st.warning("La quota attuale è inferiore alla quota target.")
 
-# ==============================================================================
-# 4. MODALITÀ RAGGIUNGI QUOTA TARGET
-# ==============================================================================
-else:
-  st.subheader("🎯 Modalità: Raggiungi Quota Target")
-
-  col_t1, col_t2 = st.columns(2)
-
-  with col_t1:
-    quota_target = st.number_input(
-        "Quota Target (mslm)",
-        value=765.00,
-        min_value=764.00,
-        max_value=783.00,
-        step=0.05,
-        format="%.2f",
-    )
-
-  with col_t2:
-    ore_target = st.number_input(
-        "In quante ore vuoi raggiungere il target?",
-        value=12.0,
-        min_value=0.5,
-        max_value=168.0,
-        step=0.5,
-        format="%.1f",
-    )
-
-  # Calcoli operativi Target
-  vol_target = get_volume_da_quota(quota_target)
-  delta_vol_totale = vol_target - vol_attuale  # m³ da variare
-
-  # Portata netta richiesta in l/s per raggiungere il target nel tempo specificato
-  q_netta_richiesta_ls = (delta_vol_totale / (ore_target * 3600.0)) * 1000.0
-  q_out_richiesta_ls = qin_stimata - q_netta_richiesta_ls
-
-  # Calcolo apertura suggerita
-  apertura_suggerita_target = get_apertura_suggerita(
-      quota_attuale, max(0.0, q_out_richiesta_ls)
+if st.button("➕ Registra Lettura", use_container_width=True):
+  st.success(
+      f"Registrato: Quota {quota_attuale:.2f} mslm | Paratoia {apertura:.1f} cm"
+      f" -> Scarico: {q_out_ls:.1f} l/s"
   )
-
-  # Ora presunta di arrivo
-  dt_rilevazione = datetime.datetime.combine(data_rilevazione, ora_rilevazione)
-  ora_presunta_arrivo = dt_rilevazione + datetime.timedelta(hours=ore_target)
-
-  # Delta quota medio ogni ora per raggiungere il target
-  delta_quota_totale_cm = (quota_target - quota_attuale) * 100.0
-  delta_quota_ora_target_cm = delta_quota_totale_cm / ore_target
-
-  # Indicatori principali
-  t1, t2, t3 = st.columns(3)
-  t1.metric("Portata Scaricata (Qout)", f"{q_out_attuale:.1f} l/s")
-  t2.metric("Portata in Entrata (Qin)", f"{qin_stimata:.1f} l/s")
-  t3.metric("Trend Quota Attuale", trend_testo)
-
-  st.markdown("---")
-
-  r1, r2, r3 = st.columns(3)
-  r1.metric(
-      "Apertura Suggerita Paratoia",
-      f"{apertura_suggerita_target:.1f} cm",
-      delta=f"Qout req: {q_out_richiesta_ls:.1f} l/s",
-  )
-  r2.metric(
-      "Ora Presunta Arrivo al Target",
-      ora_presunta_arrivo.strftime("%H:%M (%d/%m)"),
-  )
-  r3.metric(
-      "Delta Quota Previsto ogni Ora",
-      f"{delta_quota_ora_target_cm:+.1f} cm/ora",
-  )
-
-  if q_out_richiesta_ls < 0:
-    st.warning(
-        "⚠️ Per raggiungere il target nel tempo impostato, l'afflusso naturale non è sufficiente "
-        "nemmeno chiudendo completamente la paratoia (Qout = 0 l/s)."
-    )
-  elif q_out_richiesta_ls > 20000:
-    st.error(
-        "⚠️ Portata di scarico richiesta superiore alla capacità massima della paratoia."
-    )
