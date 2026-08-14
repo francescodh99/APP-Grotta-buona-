@@ -607,12 +607,11 @@ PORTATE_M3S = np.array([
 
 
 def get_qout_ls(quota_mslm, apertura_cm):
-  """Interpolazione bilineare con puro NumPy per calcolare la portata in l/s."""
+  """Interpolazione bilineare con NumPy per calcolare la portata scaricata in l/s."""
   apertura_m = apertura_cm / 100.0
   apertura_m = np.clip(apertura_m, APERTURE_M[0], APERTURE_M[-1])
   quota_mslm = np.clip(quota_mslm, QUOTE_PARATOIA[0], QUOTE_PARATOIA[-1])
 
-  # Trova l'intervallo di quota
   idx = np.searchsorted(QUOTE_PARATOIA, quota_mslm)
   if idx == 0:
     q_m3s = np.interp(apertura_m, APERTURE_M, PORTATE_M3S[0])
@@ -649,6 +648,16 @@ with col1:
       format="%.2f",
   )
 
+  # NUOVO CAMPO: Portata Entrante Qin
+  q_in_ls = st.number_input(
+      "Portata in Entrata Qin (l/s)",
+      value=545.0,
+      min_value=0.0,
+      max_value=50000.0,
+      step=5.0,
+      format="%.1f",
+  )
+
 with col2:
   apertura = st.number_input(
       "Apertura Paratoia (cm)",
@@ -669,22 +678,54 @@ q_out_ls = get_qout_ls(quota_attuale, apertura)
 vol_attuale = get_volume_da_quota(quota_attuale)
 quota_target = 765.00
 vol_target = get_volume_da_quota(quota_target)
+bilancio_delta_q = q_in_ls - q_out_ls
 
 st.markdown("---")
-st.subheader("📊 Calcoli e Stato Invaso")
+st.subheader("📊 Calcoli e Bilancio Idrico")
 
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 c1.metric(
+    label="Portata Entrante (Qin)",
+    value=f"{q_in_ls:.1f} l/s",
+    delta=f"{q_in_ls/1000:.3f} m³/s",
+)
+c2.metric(
     label="Portata Scaricata (Qout)",
     value=f"{q_out_ls:.1f} l/s",
     delta=f"{q_out_ls/1000:.3f} m³/s",
 )
-c2.metric(label="Volume Attuale Stimato", value=f"{vol_attuale:,.0f} m³")
-c3.metric(label="Quota Target", value=f"{quota_target:.2f} mslm")
+c3.metric(
+    label="Bilancio Netto (ΔQ)",
+    value=f"{bilancio_delta_q:+.1f} l/s",
+    delta_color="normal",
+)
+c4.metric(label="Volume Attuale Stimato", value=f"{vol_attuale:,.0f} m³")
 
-delta_vol = vol_attuale - vol_target
+# --- INDICAZIONI OPERATIVE IN BASE ALLA MODALITÀ ---
+if modalita == "Mantenimento Quota Costante":
+  st.markdown("#### 🎯 Analisi Mantenimento Quota")
+  if abs(bilancio_delta_q) < 1.0:
+    st.success(
+        "**Invaso in perfetto equilibrio.** La portata scaricata eguaglia la"
+        " portata in entrata. La quota rimarrà costante."
+    )
+  elif bilancio_delta_q > 0:
+    st.warning(
+        f"**Invaso in riempimento (+{bilancio_delta_q:.1f} l/s).** Per"
+        f" mantenere la quota attuale ({quota_attuale:.2f} mslm), la"
+        " paratoia dovrebbe scaricare **"
+        f"{q_in_ls:.1f} l/s**."
+    )
+  else:
+    st.info(
+        f"**Invaso in svaso ({bilancio_delta_q:.1f} l/s).** La paratoia sta"
+        " scaricando più di quanto entra. Per mantenere la quota attuale,"
+        f" ridurre lo scarico a **{q_in_ls:.1f} l/s**."
+    )
 
-if modalita == "Raggiungi Quota Target":
+elif modalita == "Raggiungi Quota Target":
+  st.markdown("#### 🎯 Analisi Raggiungimento Target")
+  delta_vol = vol_attuale - vol_target
   if delta_vol > 0:
     st.info(
         f"Volume rimanente da scaricare per la quota target ({quota_target:.2f}"
@@ -697,6 +738,6 @@ if modalita == "Raggiungi Quota Target":
 
 if st.button("➕ Registra Lettura", use_container_width=True):
   st.success(
-      f"Registrato: Quota {quota_attuale:.2f} mslm | Paratoia {apertura:.1f} cm"
-      f" -> Scarico: {q_out_ls:.1f} l/s"
+      f"Registrato: Quota {quota_attuale:.2f} mslm | Qin: {q_in_ls:.1f} l/s |"
+      f" Paratoia {apertura:.1f} cm (Qout: {q_out_ls:.1f} l/s)"
   )
